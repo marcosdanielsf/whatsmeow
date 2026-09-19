@@ -57,10 +57,15 @@ type ReqCreateGroup struct {
 func (cli *Client) CreateGroup(ctx context.Context, req ReqCreateGroup) (*types.GroupInfo, error) {
 	participantNodes := make([]waBinary.Node, len(req.Participants), len(req.Participants)+1)
 	// TODO member_share_group_history_mode
-	participantNodes = append(participantNodes, waBinary.Node{
-		Tag:     "member_add_mode",
-		Content: string(cmp.Or(req.MemberAddMode, types.GroupMemberAddModeAllMember)),
-	})
+	// Communities (IsParent) only accept the <parent> node: WhatsApp answers the whole create
+	// IQ with 400 bad-request when member_add_mode, ephemeral or membership_approval_mode ride
+	// along with it. Those three are group-only settings.
+	if !req.IsParent {
+		participantNodes = append(participantNodes, waBinary.Node{
+			Tag:     "member_add_mode",
+			Content: string(cmp.Or(req.MemberAddMode, types.GroupMemberAddModeAllMember)),
+		})
+	}
 	for i, participant := range req.Participants {
 		participant = participant.ToNonAD()
 		var participantPN types.JID
@@ -119,23 +124,25 @@ func (cli *Client) CreateGroup(ctx context.Context, req ReqCreateGroup) (*types.
 				"trigger":    "1", // TODO what's this?
 			},
 		})
-	} else {
+	} else if !req.IsParent {
 		participantNodes = append(participantNodes, waBinary.Node{
 			Tag:   "ephemeral",
 			Attrs: waBinary.Attrs{"expiration": 0},
 		})
 	}
-	approvalState := "off"
-	if req.IsJoinApprovalRequired {
-		approvalState = "on"
+	if !req.IsParent {
+		approvalState := "off"
+		if req.IsJoinApprovalRequired {
+			approvalState = "on"
+		}
+		participantNodes = append(participantNodes, waBinary.Node{
+			Tag: "membership_approval_mode",
+			Content: []waBinary.Node{{
+				Tag:   "group_join",
+				Attrs: waBinary.Attrs{"state": approvalState},
+			}},
+		})
 	}
-	participantNodes = append(participantNodes, waBinary.Node{
-		Tag: "membership_approval_mode",
-		Content: []waBinary.Node{{
-			Tag:   "group_join",
-			Attrs: waBinary.Attrs{"state": approvalState},
-		}},
-	})
 	createAttrs := waBinary.Attrs{}
 	if req.Name != "" {
 		createAttrs["subject"] = req.Name
