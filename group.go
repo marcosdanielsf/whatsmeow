@@ -48,21 +48,84 @@ type ReqCreateGroup struct {
 	types.GroupLinkedParent
 }
 
+// createGroupPrefixNodes returns the nodes that go before the participant list in a create IQ.
+//
+// Communities (IsParent) only accept the <parent> node: WhatsApp answers the whole create IQ
+// with 400 bad-request when member_add_mode, ephemeral or membership_approval_mode ride along
+// with it. Those three are group-only settings.
+func createGroupPrefixNodes(req ReqCreateGroup) []waBinary.Node {
+	if req.IsParent {
+		return nil
+	}
+	return []waBinary.Node{{
+		Tag:     "member_add_mode",
+		Content: string(cmp.Or(req.MemberAddMode, types.GroupMemberAddModeAllMember)),
+	}}
+}
+
+// createGroupSuffixNodes returns the nodes that go after the participant list in a create IQ.
+// See createGroupPrefixNodes for why communities get a much shorter list.
+func createGroupSuffixNodes(req ReqCreateGroup) []waBinary.Node {
+	var nodes []waBinary.Node
+	if req.IsParent {
+		if req.DefaultMembershipApprovalMode == "" {
+			req.DefaultMembershipApprovalMode = "request_required"
+		}
+		nodes = append(nodes, waBinary.Node{
+			Tag: "parent",
+			Attrs: waBinary.Attrs{
+				"default_membership_approval_mode": req.DefaultMembershipApprovalMode,
+			},
+		})
+	} else if !req.LinkedParentJID.IsEmpty() {
+		nodes = append(nodes, waBinary.Node{
+			Tag:   "linked_parent",
+			Attrs: waBinary.Attrs{"jid": req.LinkedParentJID},
+		})
+	}
+	if req.IsLocked {
+		nodes = append(nodes, waBinary.Node{Tag: "locked"})
+	}
+	if req.IsAnnounce {
+		nodes = append(nodes, waBinary.Node{Tag: "announcement"})
+	}
+	if req.IsEphemeral {
+		nodes = append(nodes, waBinary.Node{
+			Tag: "ephemeral",
+			Attrs: waBinary.Attrs{
+				"expiration": req.DisappearingTimer,
+				"trigger":    "1", // TODO what's this?
+			},
+		})
+	} else if !req.IsParent {
+		nodes = append(nodes, waBinary.Node{
+			Tag:   "ephemeral",
+			Attrs: waBinary.Attrs{"expiration": 0},
+		})
+	}
+	if !req.IsParent {
+		approvalState := "off"
+		if req.IsJoinApprovalRequired {
+			approvalState = "on"
+		}
+		nodes = append(nodes, waBinary.Node{
+			Tag: "membership_approval_mode",
+			Content: []waBinary.Node{{
+				Tag:   "group_join",
+				Attrs: waBinary.Attrs{"state": approvalState},
+			}},
+		})
+	}
+	return nodes
+}
+
 // CreateGroup creates a group on WhatsApp with the given name and participants.
 //
 // See ReqCreateGroup for parameters.
 func (cli *Client) CreateGroup(ctx context.Context, req ReqCreateGroup) (*types.GroupInfo, error) {
 	participantNodes := make([]waBinary.Node, len(req.Participants), len(req.Participants)+1)
 	// TODO member_share_group_history_mode
-	// Communities (IsParent) only accept the <parent> node: WhatsApp answers the whole create
-	// IQ with 400 bad-request when member_add_mode, ephemeral or membership_approval_mode ride
-	// along with it. Those three are group-only settings.
-	if !req.IsParent {
-		participantNodes = append(participantNodes, waBinary.Node{
-			Tag:     "member_add_mode",
-			Content: string(cmp.Or(req.MemberAddMode, types.GroupMemberAddModeAllMember)),
-		})
-	}
+	participantNodes = append(participantNodes, createGroupPrefixNodes(req)...)
 	for i, participant := range req.Participants {
 		participant = participant.ToNonAD()
 		var participantPN types.JID
@@ -91,55 +154,7 @@ func (cli *Client) CreateGroup(ctx context.Context, req ReqCreateGroup) (*types.
 			}}
 		}
 	}
-	if req.IsParent {
-		if req.DefaultMembershipApprovalMode == "" {
-			req.DefaultMembershipApprovalMode = "request_required"
-		}
-		participantNodes = append(participantNodes, waBinary.Node{
-			Tag: "parent",
-			Attrs: waBinary.Attrs{
-				"default_membership_approval_mode": req.DefaultMembershipApprovalMode,
-			},
-		})
-	} else if !req.LinkedParentJID.IsEmpty() {
-		participantNodes = append(participantNodes, waBinary.Node{
-			Tag:   "linked_parent",
-			Attrs: waBinary.Attrs{"jid": req.LinkedParentJID},
-		})
-	}
-	if req.IsLocked {
-		participantNodes = append(participantNodes, waBinary.Node{Tag: "locked"})
-	}
-	if req.IsAnnounce {
-		participantNodes = append(participantNodes, waBinary.Node{Tag: "announcement"})
-	}
-	if req.IsEphemeral {
-		participantNodes = append(participantNodes, waBinary.Node{
-			Tag: "ephemeral",
-			Attrs: waBinary.Attrs{
-				"expiration": req.DisappearingTimer,
-				"trigger":    "1", // TODO what's this?
-			},
-		})
-	} else if !req.IsParent {
-		participantNodes = append(participantNodes, waBinary.Node{
-			Tag:   "ephemeral",
-			Attrs: waBinary.Attrs{"expiration": 0},
-		})
-	}
-	if !req.IsParent {
-		approvalState := "off"
-		if req.IsJoinApprovalRequired {
-			approvalState = "on"
-		}
-		participantNodes = append(participantNodes, waBinary.Node{
-			Tag: "membership_approval_mode",
-			Content: []waBinary.Node{{
-				Tag:   "group_join",
-				Attrs: waBinary.Attrs{"state": approvalState},
-			}},
-		})
-	}
+	participantNodes = append(participantNodes, createGroupSuffixNodes(req)...)
 	createAttrs := waBinary.Attrs{}
 	if req.Name != "" {
 		createAttrs["subject"] = req.Name
